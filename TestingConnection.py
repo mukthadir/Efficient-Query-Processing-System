@@ -1,0 +1,128 @@
+import psycopg2
+import datetime
+import math
+
+#openconnection = psycopg2.connect("dbname=test_dds_assgn1 user=postgres password=cse512dds")
+#ratingstablename = 'Ratings'
+#ratingsfilepath = '/Users/hchou006/Downloads/ml-10M100K/ratings.dat'
+numberofpartitions = float(4)
+maximumpartition = float(5)
+window = 0
+partnumber = 0
+count1 = 0
+
+# This function creates the original table to load the data before partitioning.
+def createTable(tableName, openconnection):
+    cur = openconnection.cursor()
+    cur.execute("DROP TABLE IF EXISTS " + tableName)
+    cur.execute("CREATE TABLE {0}(UserID integer, MovieID integer, Rating float)".format(tableName))
+    openconnection.commit()
+    cur.close()
+
+# This function loads the input file to the postgres table
+def loadratings(ratingstablename, ratingsfilepath, openconnection):
+    createTable(ratingstablename, openconnection)
+
+    cur = openconnection.cursor()
+    
+    with open (ratingsfilepath) as inputFile:
+        for line in inputFile:
+            fields = line.split("::")
+            cur.execute('INSERT INTO {0} VALUES ({1}, {2}, {3})'.format(ratingstablename, *fields))
+    openconnection.commit()
+    cur.close()
+
+def rangepartition(ratingstablename, numberofpartitions, openconnection):
+    cur = openconnection.cursor()
+    cur.execute("SELECT count(*) FROM {0}".format(ratingstablename))
+    totalrows = cur.fetchall()
+    # count saves the number of rows of the origianl input data
+    count = totalrows[0][0]
+    # window is global so that it can be used for rangeinsert funtion
+    global window
+    # window determines the size of each aprtition
+    window = maximumpartition/numberofpartitions
+    # incr is used to proceed to next window from the current one
+    incr = 0
+    for part in range(1, int(numberofpartitions+1)):
+        cur.execute("DROP TABLE IF EXISTS range_part{0}".format(part))
+        cur.execute("CREATE TABLE range_part{0}(UserID integer, MovieID integer, Rating float)".format(part))
+        # openwindow marks the starting point of partition
+        openwindow = incr*window
+        # closewindow marks the ending point of partition
+        closewindow = (incr+1)*window
+        if part == numberofpartitions:
+            cur.execute("INSERT INTO range_part{0} SELECT * FROM Ratings WHERE Rating >= {1} AND Rating <= {2}".format(part, openwindow, closewindow))
+        else:
+            cur.execute("INSERT INTO range_part{0} SELECT * FROM Ratings WHERE Rating >= {1} AND Rating < {2}".format(part, openwindow, closewindow))
+        incr = incr + 1
+    openconnection.commit()
+    cur = openconnection.cursor()    
+    cur.close()
+
+def rangeinsert(ratingstablename, userid, itemid, rating, openconnection):
+    cur = openconnection.cursor()
+    # fragmentFloat determines in which fragment should the new tuple go
+    fragmentFloat = rating/window
+    fragmentNumber = int(math.ceil(fragmentFloat))
+    cur.execute("INSERT INTO range_part{0} VALUES ({1}, {2}, {3})".format(fragmentNumber, userid, itemid, rating))
+    openconnection.commit()
+    cur.close()
+
+def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
+    cur = openconnection.cursor()
+    cur.execute("SELECT count(*) FROM {0}".format(ratingstablename))
+    totalrows = cur.fetchall()
+    global count1
+    count1 = totalrows[0][0]
+    
+    cur.execute("SELECT *, ROW_NUMBER() OVER (ORDER BY NULL) As RowNumber FROM {0}".format(ratingstablename))
+    # partnumber is global so that it can be used for rrobin insert function
+    global partnumber
+    partnumber = numberofpartitions
+    for part in range(1, int(partnumber+1)):
+        cur.execute("DROP TABLE IF EXISTS rrobin_part{0}".format(part-1))
+        cur.execute("CREATE TABLE rrobin_part{0}(UserID integer, MovieID integer, Rating float)".format(part-1))
+
+        if part < partnumber:
+            cur.execute("INSERT INTO rrobin_part{0} SELECT exp.UserID, exp.MovieID, exp.Rating FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY NULL) As RowNumber FROM {1})exp WHERE exp.RowNumber%{2} = {3}".format(part-1, ratingstablename, partnumber, part))
+        else:
+            cur.execute("INSERT INTO rrobin_part{0} SELECT exp.UserID, exp.MovieID, exp.Rating FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY NULL) As RowNumber FROM {1})exp WHERE exp.RowNumber%{2} = 0".format(part-1, ratingstablename, partnumber))
+    openconnection.commit()
+    cur.close()
+
+def roundrobininsert(ratingstablename, userid, itemid, rating, openconnection):
+    fragment = int(count1%partnumber)
+    cur = openconnection.cursor()
+    cur.execute("INSERT INTO rrobin_part{0} VALUES ({1}, {2}, {3})".format((fragment), userid, itemid, rating))
+    openconnection.commit()
+    cur.close()
+
+def deletepartitionsandexit(openconnection):
+    cur = openconnection.cursor()
+    for part in range(1, int(numberofpartitions+1)):
+        cur.execute("DROP TABLE IF EXISTS part{0}".format(part))
+        cur.execute("DROP TABLE IF EXISTS rrobin_part{0}".format(part))
+    openconnection.commit()
+    cur.close()
+ 
+print datetime.datetime.utcnow()
+print "Process Started"
+loadratings(ratingstablename, ratingsfilepath, openconnection)
+print datetime.datetime.utcnow()
+print "Loading Completed"
+rangepartition(ratingstablename, numberofpartitions, openconnection)
+print datetime.datetime.utcnow()
+print "Range Partition completed"
+rangeinsert(ratingstablename, 2, 321, 3.5, openconnection)
+print datetime.datetime.utcnow()
+print "range insert completed"
+roundrobinpartition(ratingstablename, numberofpartitions, openconnection)
+print datetime.datetime.utcnow()
+print "round robin completed"
+roundrobininsert(ratingstablename, 32, 34, 4.5, openconnection)
+print datetime.datetime.utcnow()
+print "round robin insert completed"
+deletepartitions(openconnection)
+print datetime.datetime.utcnow()
+print "completed"
